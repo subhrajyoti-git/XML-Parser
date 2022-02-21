@@ -1,0 +1,344 @@
+# -*- coding: utf-8 -*-
+
+from lxml import etree
+import os
+import logging
+import zipfile
+import datetime
+from shutil import copyfile
+from shutil import move
+import csv
+import time
+
+environment = 0
+if environment == 1:
+    base_path = '<path>'
+
+else:
+    base_path = r'<path>'
+
+
+input_dir = os.path.join(os.sep, base_path, 'input')
+output_dir = os.path.join(os.sep, base_path, 'output')
+cellLocationFile = os.path.join(os.sep, output_dir, 'LatestRANCells.txt')
+arch_dir = os.path.join(os.sep, base_path, 'archive')
+err_dir = os.path.join(os.sep, base_path, 'error')
+logfile = os.path.join(os.sep, base_path, 'logs_' + str(datetime.datetime.now().date()) + '.log')
+logging.basicConfig(filename=logfile, level=logging.INFO)
+
+#ran_to_filter = ['LTERAN', 'NRRAN']
+ran_to_filter = []
+none = "\\" + "N"
+indent = 0
+superListCell = []
+#test_Cells = ['12', 'LMU0433OB2043312', 'CHMC9O', 'KOFA5N', 'KOFA5O', '9O269G', '9O249G', '9O239G', 'OLMP5N', 'OLMP1G']
+test_Cells = []
+dupChk = {}
+# To filter out Test cells data
+test_check = 1  # Flag to check whether test cells present
+
+columns = ['rat', 'cellame', 'cid', 'mcc', 'mnc', 'lat', 'lon', 'beam_direction', 'cell_type', 'cell_range', 'tilt',
+           'height', 'sector', 'carrier', 'region1', 'lac', 'rac', 'msc', 'gsm_bsc', 'gsm_bts', 'wcdma_sac', 'wcdma_mc',
+           'wcdma_nodeb_name', 'lte_enodeb_id', 'lte_enodeb_name', 'lte_tac', 'lte_eci', 'region2', 'region3',
+           'region4', 'ran_vendor', 'shared_cell', 'cell_group_name', 'wcdma_rnc_id', 'region5', 'region6', 'region7',
+           'nr_cell_id', 'nr_pci', 'nr_gnodeb_id', 'nr_gnodeb_name', 'nr_gnodeb_ip', 'beam_width']
+columns4G = ['rat', 'cellame', 'cid', 'mcc', 'mnc', 'lat', 'lon', 'cell_range', 'sector', 'carrier', 'region1',
+                 'lte_enodeb_id', 'lte_enodeb_name', 'lte_tac', 'lte_eci', 'region2', 'region3', 'region4']
+columns5G = ['rat', 'cellame', 'mcc', 'mnc', 'lat', 'lon', 'cell_range', 'sector', 'carrier', 'region1', 'region2', 'region3',
+           'region4', 'nr_cell_id', 'nr_pci', 'nr_gnodeb_id', 'nr_gnodeb_name', 'nr_gnodeb_ip']
+
+
+def DataGNBCUCPFunction(content, sTags):
+    if content.find("./{EricssonSpecificAttributes.xsd}pLMNId"):
+        mcc = content.find("./{EricssonSpecificAttributes.xsd}pLMNId/{EricssonSpecificAttributes.xsd}mcc").text
+        mnc = content.find("./{EricssonSpecificAttributes.xsd}pLMNId/{EricssonSpecificAttributes.xsd}mnc").text
+        if (mcc is not none):
+            sTags["mcc"] = mcc
+        if (mnc is not none):
+            sTags["mnc"] = mnc
+    else:
+        sTags["mcc"] = "NA"
+        sTags["mnc"] = "NA"
+
+def DataGNBDUFunction(content, sTags, nodeId):
+    if content.find("./{EricssonSpecificAttributes.xsd}gNBId"):
+        gNBId = content.find("./{EricssonSpecificAttributes.xsd}gNBId").text
+    else:
+        gNBId="Tag Not Available"
+    #gNBDUName = content.find("./{EricssonSpecificAttributes.xsd}gNBDUName").text
+    if (gNBId is not None):
+        sTags["gnbid"] = gNBId
+    if (nodeId is not None):
+        sTags["gnbname"] = nodeId
+
+def DataGNBCUUPFunction(content, sTags):
+    gNBIp = content.find("{EricssonSpecificAttributes.xsd}localEndPoint").text
+    if (gNBIp is not None):
+        sTags["gnbip"] = gNBIp
+
+def DataNRCellDU(content, cellDet, nr_id):
+    if content.find("{EricssonSpecificAttributes.xsd}nRCellDUId"):
+        cellName = content.find("{EricssonSpecificAttributes.xsd}nRCellDUId").text
+    else:
+        cellName = nr_id
+        print(nr_id)
+    cellRange = content.find("{EricssonSpecificAttributes.xsd}cellRange").text
+    nrPci = content.find("{EricssonSpecificAttributes.xsd}nRPCI").text
+    nrCellId = content.find("{EricssonSpecificAttributes.xsd}cellLocalId").text
+    if (cellName is not None):
+        sectorCarrierId = cellName[0:5]
+        carrier = cellName[len(cellName) - 1]
+        region1 = cellName[0:4]
+        region2 = None
+        cellDet.append([cellName, cellRange, nrPci, nrCellId, sectorCarrierId, carrier, region1, region2])
+
+def DataNRSectorCarrier(content, cellLatLon):
+    id = content.getparent().getparent().get("id")
+    lat = 0 if content.find("./{EricssonSpecificAttributes.xsd}latitude").text is None else content.find("./{EricssonSpecificAttributes.xsd}latitude").text
+    lon = 0 if content.find("./{EricssonSpecificAttributes.xsd}longitude").text is None else content.find("./{EricssonSpecificAttributes.xsd}longitude").text
+    latitude = str(float(lat) * 0.000001)
+    longitude = str(float(lon) * 0.000001)
+    cellLatLon[id] = [latitude, longitude]
+
+def concatData5G(singleTags, cellDet, cellLatLon):
+    print (singleTags)
+    print(cellDet)
+    print(cellLatLon)
+    for cellData in cellDet:
+        if (testCellChk(cellData[0]) == 0):
+            dataSet5G = {"rat" : singleTags["rat"], "cellame" : cellData[0], "mcc" : singleTags["mcc"], "mnc" : singleTags["mnc"],
+                         "lat" : cellLatLon[cellData[0]][0], "lon" : cellLatLon[cellData[0]][1], "cell_range" : cellData[1],
+                         "sector" : cellData[4], "carrier" : cellData[5], "region1" : cellData[6], "region2" : cellData[7],
+                         "region3" : singleTags["region3"], "region4" : mapRegionBasedOnRAN(singleTags["region3"]), "nr_cell_id" : cellData[3],
+                         "nr_pci" : cellData[2], "nr_gnodeb_name" : singleTags["gnbname"], "nr_gnodeb_id" : singleTags["gnbid"],
+                         "nr_gnodeb_ip" : singleTags["gnbip"]}
+            cellLocation = []
+            for i in columns:
+                if i in columns5G:
+                    if (dataSet5G[i] != "" and dataSet5G[i] is not None):
+                        cellLocation.append(dataSet5G[i])
+                    else:
+                        cellLocation.append(none)
+                else:
+                    cellLocation.append(none)
+            if (chkDup(cellLocation)):
+                superListCell.append(cellLocation)
+        else:
+            logging.info('Skipped entry for Test Cells : ' + cellData[0])
+
+def concatData4G(dataSet4G):
+    cellLocation = []
+    for i in columns:
+        if i in columns4G:
+            if (dataSet4G[i] != "" and dataSet4G[i] is not None):
+                cellLocation.append(dataSet4G[i])
+            else:
+                cellLocation.append(none)
+        else:
+            cellLocation.append(none)
+    if (chkDup(cellLocation)):
+        superListCell.append(cellLocation)
+    #appendFile(cellLocation)
+
+def chkDup(cellLocation):
+    if (not(dupChk.__contains__(cellLocation[0]+cellLocation[1]))):
+        dupChk.update({cellLocation[0] + cellLocation[1]: True})
+        return True
+    else:
+        return False
+
+def appendFile(cellLoc):
+    with open(cellLocationFile, "w") as outfile:
+        writer = csv.writer(outfile, delimiter='\t', quoting=csv.QUOTE_MINIMAL, lineterminator='\n')
+        writer.writerows(cellLoc)
+    outfile.close()
+
+def testCellChk(cellName):
+    test_cell = 0  # Flag to check If cell present in test_cells, will skip it
+    if (test_check == 1):
+        logging.info("checking if cell is test for : " + cellName)
+        if (cellName in test_Cells or cellName[0:1].isdigit()):
+            logging.info("Its a Test cell :" + cellName + " skipping its entry")
+            test_cell = 1
+    return test_cell
+
+def chk_val(var):
+    if (var is not None and var != ""):
+        return var
+    else:
+        return none
+
+def LRANProcessing(infile):
+    count = 0
+    for event, meContext in etree.iterparse(infile, tag="{genericNrm.xsd}MeContext"):
+        count = count + 1
+        if (meContext.find("{genericNrm.xsd}ManagedElement") is not None and meContext.getparent().get(
+                "id") not in ran_to_filter):
+            logging.info("Inside MeContext ID:" + meContext.get("id") + " Count : " + str(count))
+            processing4g(meContext)
+        meContext.clear()
+
+def MRANProcessing(infile):
+    count = 0
+    for event, meContext in etree.iterparse(infile, tag="{genericNrm.xsd}MeContext"):
+        count = count + 1
+        if (meContext.find("{genericNrm.xsd}ManagedElement") is not None and meContext.getparent().get(
+                "id") not in ran_to_filter):
+            nodeId = meContext.get("id")
+            logging.info("Inside MeContext ID:" + meContext.get("id") + " Count : " + str(count))
+            flag5 = flag4 = 0
+            for k in meContext.findall(
+                    "./{genericNrm.xsd}ManagedElement/{genericNrm.xsd}VsDataContainer/{genericNrm.xsd}VsDataContainer"):
+                if(len(k.get("id")) == 6 and k.get("id")[-1:] == "U"):
+                    flag5 = 1
+                elif (len(k.get("id")) == 6 and k.get("id")[-1:] != "U"):
+                    flag4 = 1
+                if (flag4 ==1 and flag5 == 1):
+                    break
+            if (flag4 == 1 ):
+                processing4g(meContext) #for processing 4g cells information
+            if (flag5 == 1):
+                processing5g(meContext, nodeId) #for processing 5g cells information
+        meContext.clear()
+
+def NRANProcessing(infile):
+    count = 0
+    for event, meContext in etree.iterparse(infile, tag="{genericNrm.xsd}MeContext"):
+        count = count + 1
+        if (meContext.find("{genericNrm.xsd}ManagedElement") is not None and meContext.getparent().get(
+            "id") not in ran_to_filter):
+            nodeId = meContext.get("id")
+            logging.info("Inside MeContext ID:" + nodeId + " Count : " + str(count))
+            processing5g(meContext, nodeId)
+        meContext.clear()
+
+def processing4g(meContext):
+    for vsDataContainer in meContext.find("{genericNrm.xsd}ManagedElement").findall("{genericNrm.xsd}VsDataContainer"):
+        # Reading Data Container vsDataENodeBFunction"""
+        if (vsDataContainer.find("{genericNrm.xsd}attributes").find(
+                "{genericNrm.xsd}vsDataType").text == "vsDataENodeBFunction"):
+            eNodeBFunction = vsDataContainer.find("{genericNrm.xsd}attributes").find(
+                "{EricssonSpecificAttributes.xsd}vsDataENodeBFunction")
+            if eNodeBFunction.find("{EricssonSpecificAttributes.xsd}eNodeBPlmnId"):
+                eNodeBPlmnId = eNodeBFunction.find("{EricssonSpecificAttributes.xsd}eNodeBPlmnId")
+                mcc = eNodeBPlmnId.find("{EricssonSpecificAttributes.xsd}mcc").text
+                mnc = eNodeBPlmnId.find("{EricssonSpecificAttributes.xsd}mnc").text
+            else:
+                mcc = 'NOT AVAILABLE'
+                mnc = 'NOT AVAILABLE'
+            enbId = eNodeBFunction.find("{EricssonSpecificAttributes.xsd}eNBId").text
+            vsDataContainers = vsDataContainer.findall("{genericNrm.xsd}VsDataContainer")
+            eNodeBFunction.clear()
+            region3 = meContext.getparent().get("id")
+            # Reading Data Container vsDataEUtranCellFDD
+            for dataContainer in vsDataContainers:
+                if (dataContainer.find("{genericNrm.xsd}attributes").find(
+                        "{genericNrm.xsd}vsDataType").text == "vsDataEUtranCellFDD"):
+                    eutranCell = dataContainer.find("{genericNrm.xsd}attributes").find(
+                        "{EricssonSpecificAttributes.xsd}vsDataEUtranCellFDD")
+                    cellName = dataContainer.get("id")
+                    enodeBName = meContext.get("id")
+                    # enodeBName = cellName[0:4]
+                    cellId = eutranCell.find("{EricssonSpecificAttributes.xsd}cellId").text
+                    lat = eutranCell.find("{EricssonSpecificAttributes.xsd}latitude").text
+                    latitude = str(float(lat) * 0.000001)
+                    lon = eutranCell.find("{EricssonSpecificAttributes.xsd}longitude").text
+                    longitude = str(float(lon) * 0.000001)
+                    cellRange = eutranCell.find("{EricssonSpecificAttributes.xsd}cellRange").text
+                    tac = eutranCell.find("{EricssonSpecificAttributes.xsd}tac").text
+                    eci = 256 * int(enbId) + int(cellId)
+                    sectorCarrierId = cellName[0:5]
+                    if (testCellChk(cellName) == 0):
+                        dataSet4G = {"rat": "4G", "cellame": cellName, "cid": cellId, "mcc": mcc, "mnc": mnc,
+                                     "lat": latitude,
+                                     "lon": longitude, "cell_range": cellRange, "sector": sectorCarrierId,
+                                     "carrier": cellName[len(cellName) - 1], "region1": cellName[0:4],
+                                     "lte_enodeb_id": enbId,
+                                     "lte_enodeb_name": enodeBName, "lte_tac": tac, "lte_eci": str(eci),
+                                     "region2": "None", "region3": region3,
+                                     "region4": "region4"}
+                        concatData4G(dataSet4G)
+                    else:
+                        logging.info('Skipped entry for Test Cells : ' + cellName)
+
+def processing5g(meContext, nodeId):
+    region3 = meContext.getparent().get("id")
+    singleTags = {"mcc": "", "mnc": "", "gnbid": "", "gnbname": "", "gnbip": "", "region3": region3, "rat": "5G"}
+    cellDet = []
+    cellLatLon = {}
+    for vsDataContainer in meContext.find("{genericNrm.xsd}ManagedElement").findall(
+            "{genericNrm.xsd}VsDataContainer"):
+        GNBCUCPFunction = vsDataContainer.find("{genericNrm.xsd}attributes").find(
+            "{EricssonSpecificAttributes.xsd}vsDataGNBCUCPFunction")
+        if (GNBCUCPFunction is not None):
+            DataGNBCUCPFunction(GNBCUCPFunction, singleTags)
+
+        GNBCUUPFunction = vsDataContainer.find(
+            "./{genericNrm.xsd}VsDataContainer/{genericNrm.xsd}VsDataContainer/" \
+            "{genericNrm.xsd}attributes/{EricssonSpecificAttributes.xsd}vsDataS1ULink")
+        if (GNBCUUPFunction is not None):
+            DataGNBCUUPFunction(GNBCUUPFunction, singleTags)
+
+        for NRCellDU in vsDataContainer.findall(
+                "./{genericNrm.xsd}VsDataContainer/{genericNrm.xsd}attributes/"
+                "{EricssonSpecificAttributes.xsd}vsDataNRCellDU"):
+            if (NRCellDU is not None):
+                nr_id=  NRCellDU.getparent().getparent().get("id")
+                DataNRCellDU(NRCellDU, cellDet,nr_id)
+
+        GNBDUFunction = vsDataContainer.find("{genericNrm.xsd}attributes").find(
+            "{EricssonSpecificAttributes.xsd}vsDataGNBDUFunction")
+        if (GNBDUFunction is not None):
+            DataGNBDUFunction(GNBDUFunction, singleTags, nodeId)
+
+        for NRSectorCarrier in vsDataContainer.findall(
+                "./{genericNrm.xsd}VsDataContainer/{genericNrm.xsd}attributes/"
+                "{EricssonSpecificAttributes.xsd}vsDataNRSectorCarrier"):
+            if (NRSectorCarrier is not None):
+                DataNRSectorCarrier(NRSectorCarrier, cellLatLon)
+    concatData5G(singleTags, cellDet, cellLatLon)
+
+
+logging.info('Started parsing - ' + str(datetime.datetime.now()))
+#extension = ".zip"
+os.chdir(input_dir)  # change directory from working dir to dir with files
+ranFiles = [f for f in os.listdir(input_dir) if f.endswith("zip")]
+print("Ranfiles",ranFiles)
+ranFiles.sort(reverse=False)
+
+#with open(cellLocationFile, "w") as outfile:
+"""
+for heading in columns:
+    outfile.write(heading)
+    outfile.write('\t')
+outfile.write("\n")
+"""
+
+for ranFile in ranFiles:
+    file_name = os.path.abspath(ranFile)
+    print(file_name)
+    logging.info("Processing starts for: " + input_dir + " : " + file_name)
+    zip_ref = zipfile.ZipFile(file_name)
+    print(zip_ref)
+    zip_ref.extractall(input_dir)  # extract file to dir
+    for zipFile in zip_ref.infolist():
+        xmlFile = os.path.abspath(zipFile.filename)
+        print("XML",xmlFile)
+        logging.info("Extracted File: " + xmlFile)
+        if (ranFile.startswith("LRAN") and xmlFile.endswith("xml")):
+            logging.info("LRAN: " + xmlFile)
+            LRANProcessing(xmlFile)
+            os.remove(xmlFile)
+        elif (ranFile.startswith("MRAN") and xmlFile.endswith("xml")):
+            logging.info("MRAN: " + xmlFile)
+            MRANProcessing(xmlFile)
+            os.remove(xmlFile)
+        elif (ranFile.startswith("EEA_5G") and xmlFile.endswith("xml")):
+            logging.info("EEA_5G: " + xmlFile)
+            NRANProcessing(xmlFile)
+            os.remove(xmlFile)
+    zip_ref.close()
+#    move(file_name, os.path.join(os.sep, arch_dir, ranFile))
+
+appendFile(superListCell)
+logging.info('Completed parsing - ' + str(datetime.datetime.now()))
